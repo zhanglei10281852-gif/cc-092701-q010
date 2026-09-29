@@ -51,14 +51,14 @@ class ComputeRepository:
     def task_by_idempotency(self, requested_by: str, key: str) -> sqlite3.Row | None:
         return self.connection.execute("SELECT * FROM compute_tasks WHERE requested_by=? AND idempotency_key=?", (requested_by, key)).fetchone()
 
-    def create_task(self, *, template_id: int, project_code: str, requested_by: str, parameters: dict[str, Any], parameter_digest: str, priority: int, idempotency_key: str, max_attempts: int, now: str) -> dict[str, Any]:
+    def create_task(self, *, template_id: int, project_code: str, requested_by: str, parameters: dict[str, Any], parameter_digest: str, priority: int, idempotency_key: str, max_attempts: int, now: str, class_code: str = "") -> dict[str, Any]:
         cursor = self.connection.execute(
-            "INSERT INTO compute_tasks(template_id,project_code,requested_by,parameters_json,parameter_digest,priority,idempotency_key,status,attempt_count,max_attempts,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,?)",
-            (template_id, project_code, requested_by, json.dumps(parameters, ensure_ascii=False, sort_keys=True), parameter_digest, priority, idempotency_key, max_attempts, now, now, now),
+            "INSERT INTO compute_tasks(template_id,project_code,class_code,requested_by,parameters_json,parameter_digest,priority,idempotency_key,status,attempt_count,max_attempts,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'queued',0,?,?,?,?)",
+            (template_id, project_code, class_code, requested_by, json.dumps(parameters, ensure_ascii=False, sort_keys=True), parameter_digest, priority, idempotency_key, max_attempts, now, now, now),
         )
         return dict(self.task_by_id(cursor.lastrowid))
 
-    def queued_candidate(self, capabilities: Iterable[str], now: str) -> sqlite3.Row | None:
+    def queued_candidate(self, capabilities: Iterable[str], now: str, freeze_clause: tuple[str | None, list[Any]] | None = None) -> sqlite3.Row | None:
         capability_list = sorted(set(capabilities))
         params: list[Any] = [now]
         condition = ""
@@ -66,6 +66,10 @@ class ComputeRepository:
             placeholders = ",".join("?" for _ in capability_list)
             condition = f" AND tpl.algorithm IN ({placeholders})"
             params.extend(capability_list)
+        freeze_sql, freeze_params = freeze_clause or (None, [])
+        if freeze_sql:
+            condition += freeze_sql
+            params.extend(freeze_params)
         return self.connection.execute(
             "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT 1",
             params,
@@ -83,7 +87,7 @@ class ComputeRepository:
             (task_id, actor, action, reason, json.dumps(before, ensure_ascii=False, sort_keys=True), json.dumps(after, ensure_ascii=False, sort_keys=True), batch_key, now),
         )
 
-    def list_tasks(self, *, status: str | None, project_code: str | None, requested_by: str | None, limit: int) -> list[dict[str, Any]]:
+    def list_tasks(self, *, status: str | None, project_code: str | None, requested_by: str | None, class_code: str | None = None, limit: int) -> list[dict[str, Any]]:
         clauses: list[str] = []
         values: list[Any] = []
         if status:
@@ -95,6 +99,9 @@ class ComputeRepository:
         if requested_by:
             clauses.append("t.requested_by=?")
             values.append(requested_by)
+        if class_code:
+            clauses.append("t.class_code=?")
+            values.append(class_code)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         values.append(limit)
         rows = self.connection.execute(

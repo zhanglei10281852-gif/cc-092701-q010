@@ -2,8 +2,22 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.compute.schemas import BatchOperation, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
+from app.compute.schemas import (
+    BatchOperation,
+    CancelRequest,
+    PriorityRequest,
+    QuotaSet,
+    RetryRequest,
+    TaskClaim,
+    TaskFailure,
+    TaskResult,
+    TaskSubmit,
+    TemplateCreate,
+    WindowCreate,
+    WindowRevoke,
+)
 from app.compute.service import ComputeOperationsService
+from app.compute.window_service import MaintenanceWindowService
 
 router = APIRouter(prefix="/api/compute", tags=["科学计算任务运营"])
 
@@ -33,8 +47,8 @@ def submit_task(payload: TaskSubmit):
 
 
 @router.get("/tasks")
-def list_tasks(status: str | None = None, project_code: str | None = None, requested_by: str | None = None, limit: int = Query(default=100, ge=1, le=500)):
-    return {"items": service().list_tasks(status=status, project_code=project_code, requested_by=requested_by, limit=limit)}
+def list_tasks(status: str | None = None, project_code: str | None = None, requested_by: str | None = None, class_code: str | None = None, limit: int = Query(default=100, ge=1, le=500)):
+    return {"items": service().list_tasks(status=status, project_code=project_code, requested_by=requested_by, class_code=class_code, limit=limit)}
 
 
 @router.get("/task-details/{task_id}")
@@ -90,3 +104,34 @@ def recover_expired(actor: str = Query(default="recovery-worker", min_length=1))
 @router.get("/summary")
 def summary():
     return service().summary()
+
+
+def window_service() -> MaintenanceWindowService:
+    return MaintenanceWindowService()
+
+
+@router.post("/maintenance-windows", status_code=201)
+def create_maintenance_window(payload: WindowCreate):
+    data = payload.model_dump()
+    actor = data.pop("created_by")
+    return window_service().create_window(data, actor)
+
+
+@router.get("/maintenance-windows")
+def list_maintenance_windows(include_finished: bool = False):
+    return {"items": window_service().list_windows(include_finished=include_finished)}
+
+
+@router.get("/maintenance-windows/{code}")
+def get_maintenance_window(code: str):
+    return window_service().get_window(code)
+
+
+@router.post("/maintenance-windows/{code}/advance")
+def advance_maintenance_window(code: str, actor: str = Query(..., min_length=1), to_stage: str | None = Query(default=None)):
+    return window_service().advance(code, actor, to_stage=to_stage)
+
+
+@router.post("/maintenance-windows/{code}/revoke")
+def revoke_maintenance_window(code: str, payload: WindowRevoke):
+    return window_service().revoke(code, payload.actor, payload.reason)

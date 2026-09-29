@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from app.compute.repository import ComputeRepository
+from app.compute.window_service import MaintenanceWindowService, apply_scheduled_transitions
 from app.core.clock import Clock, SystemClock, to_storage
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.database import get_connection, transaction
@@ -68,10 +69,11 @@ class ComputeOperationsService:
                 requested_by=payload["requested_by"], parameters=parameters,
                 parameter_digest=parameter_digest, priority=payload["priority"],
                 idempotency_key=payload["idempotency_key"], max_attempts=template["max_attempts"], now=now,
+                class_code=payload.get("class_code", ""),
             )
 
-    def list_tasks(self, *, status: str | None = None, project_code: str | None = None, requested_by: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        return self.repository.list_tasks(status=status, project_code=project_code, requested_by=requested_by, limit=max(1, min(limit, 500)))
+    def list_tasks(self, *, status: str | None = None, project_code: str | None = None, requested_by: str | None = None, class_code: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        return self.repository.list_tasks(status=status, project_code=project_code, requested_by=requested_by, class_code=class_code, limit=max(1, min(limit, 500)))
 
     def get_task(self, task_id: int) -> dict[str, Any]:
         row = self.repository.task_by_id(task_id)
@@ -88,7 +90,10 @@ class ComputeOperationsService:
         lease_until = to_storage(now_value + timedelta(seconds=lease_seconds))
         with transaction(immediate=True) as connection:
             repository = ComputeRepository(connection)
-            candidate = repository.queued_candidate(capabilities, now)
+            # 先按计划时刻推进维护窗口，再排除所有排空/强制窗口命中的任务。
+            apply_scheduled_transitions(connection, self.clock)
+            freeze_clause = MaintenanceWindowService(connection, self.clock).claim_freeze_clause()
+            candidate = repository.queued_candidate(capabilities, now, freeze_clause)
             if candidate is None:
                 return None
             cursor = connection.execute(

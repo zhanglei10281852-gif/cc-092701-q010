@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     template_id INTEGER NOT NULL REFERENCES compute_templates(id) ON DELETE RESTRICT,
     project_code TEXT NOT NULL,
+    class_code TEXT NOT NULL DEFAULT '',
     requested_by TEXT NOT NULL,
     parameters_json TEXT NOT NULL,
     parameter_digest TEXT NOT NULL,
@@ -270,6 +271,7 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_compute_tasks_queue ON compute_tasks(status,priority DESC,available_at,created_at);
 CREATE INDEX IF NOT EXISTS idx_compute_tasks_owner ON compute_tasks(requested_by,status,created_at);
+CREATE INDEX IF NOT EXISTS idx_compute_tasks_class ON compute_tasks(class_code);
 CREATE TABLE IF NOT EXISTS compute_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
@@ -293,6 +295,49 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+CREATE TABLE IF NOT EXISTS compute_maintenance_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    stage TEXT NOT NULL DEFAULT 'announced' CHECK(stage IN ('announced','draining','enforcing','recovered','revoked')),
+    deadline_policy TEXT NOT NULL DEFAULT 'cancel' CHECK(deadline_policy IN ('cancel','requeue')),
+    drain_at TEXT NOT NULL,
+    enforce_at TEXT NOT NULL,
+    recover_at TEXT,
+    entered_announced_at TEXT NOT NULL,
+    entered_draining_at TEXT,
+    entered_enforcing_at TEXT,
+    entered_recovered_at TEXT,
+    revoked_at TEXT,
+    revoke_reason TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_stage ON compute_maintenance_windows(stage);
+CREATE TABLE IF NOT EXISTS compute_maintenance_task_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id INTEGER NOT NULL REFERENCES compute_maintenance_windows(id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    phase TEXT NOT NULL CHECK(phase IN ('drain','enforce','restore')),
+    action TEXT NOT NULL,
+    before_json TEXT NOT NULL,
+    after_json TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(window_id, task_id, phase)
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_actions_task ON compute_maintenance_task_actions(task_id);
+CREATE TABLE IF NOT EXISTS compute_maintenance_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id INTEGER NOT NULL REFERENCES compute_maintenance_windows(id) ON DELETE CASCADE,
+    event TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_events_window ON compute_maintenance_events(window_id,id);
 '''
 
 PERMISSIONS = [
@@ -312,6 +357,16 @@ PERMISSIONS = [
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
 ]
+
+
+def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _apply_lightweight_migrations(connection: sqlite3.Connection) -> None:
+    if "class_code" not in _column_names(connection, "compute_tasks"):
+        connection.execute("ALTER TABLE compute_tasks ADD COLUMN class_code TEXT NOT NULL DEFAULT ''")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_compute_tasks_class ON compute_tasks(class_code)")
 
 
 def database_path() -> Path:
@@ -363,6 +418,7 @@ def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _apply_lightweight_migrations(connection)
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

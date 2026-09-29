@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -26,6 +27,7 @@ class QuotaSet(BaseModel):
 class TaskSubmit(BaseModel):
     template_code: str = Field(min_length=2, max_length=64)
     project_code: str = Field(min_length=1, max_length=80)
+    class_code: str = Field(default="", max_length=80)
     requested_by: str = Field(min_length=1, max_length=80)
     parameters: dict[str, Any]
     priority: int = Field(default=50, ge=0, le=100)
@@ -80,3 +82,33 @@ class BatchOperation(BaseModel):
         if self.operation == "priority" and self.priority is None:
             raise ValueError("批量调整优先级时必须提供 priority")
         return self
+
+
+class WindowScope(BaseModel):
+    template_codes: list[str] = Field(default_factory=list, max_length=50)
+    project_codes: list[str] = Field(default_factory=list, max_length=50)
+    class_codes: list[str] = Field(default_factory=list, max_length=50)
+
+
+class WindowCreate(BaseModel):
+    code: str = Field(min_length=2, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]+$")
+    name: str = Field(min_length=2, max_length=120)
+    scope: WindowScope
+    deadline_policy: Literal["cancel", "requeue"] = "cancel"
+    drain_at: datetime | None = None
+    enforce_after_seconds: int = Field(default=3600, ge=0, le=30 * 24 * 3600)
+    enforce_at: datetime | None = None
+    recover_at: datetime | None = None
+    created_by: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def validate_scope_present(self) -> "WindowCreate":
+        scope = self.scope
+        if not (scope.template_codes or scope.project_codes or scope.class_codes):
+            raise ValueError("维护窗口至少需要指定一个模板、课程或班级筛选条件")
+        return self
+
+
+class WindowRevoke(BaseModel):
+    actor: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=2, max_length=1000)
