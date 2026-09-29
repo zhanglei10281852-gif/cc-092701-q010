@@ -65,6 +65,7 @@ class ComputeOperationsService:
             self._check_quota(repository, payload["requested_by"], now_value)
             return repository.create_task(
                 template_id=template["id"], project_code=payload["project_code"],
+                class_code=payload.get("class_code", ""),
                 requested_by=payload["requested_by"], parameters=parameters,
                 parameter_digest=parameter_digest, priority=payload["priority"],
                 idempotency_key=payload["idempotency_key"], max_attempts=template["max_attempts"], now=now,
@@ -88,7 +89,7 @@ class ComputeOperationsService:
         lease_until = to_storage(now_value + timedelta(seconds=lease_seconds))
         with transaction(immediate=True) as connection:
             repository = ComputeRepository(connection)
-            candidate = repository.queued_candidate(capabilities, now)
+            candidate = repository.queued_candidate(capabilities, now, repository.blocking_window_selectors())
             if candidate is None:
                 return None
             cursor = connection.execute(

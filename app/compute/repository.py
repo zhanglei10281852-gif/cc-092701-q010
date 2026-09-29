@@ -51,14 +51,14 @@ class ComputeRepository:
     def task_by_idempotency(self, requested_by: str, key: str) -> sqlite3.Row | None:
         return self.connection.execute("SELECT * FROM compute_tasks WHERE requested_by=? AND idempotency_key=?", (requested_by, key)).fetchone()
 
-    def create_task(self, *, template_id: int, project_code: str, requested_by: str, parameters: dict[str, Any], parameter_digest: str, priority: int, idempotency_key: str, max_attempts: int, now: str) -> dict[str, Any]:
+    def create_task(self, *, template_id: int, project_code: str, class_code: str, requested_by: str, parameters: dict[str, Any], parameter_digest: str, priority: int, idempotency_key: str, max_attempts: int, now: str) -> dict[str, Any]:
         cursor = self.connection.execute(
-            "INSERT INTO compute_tasks(template_id,project_code,requested_by,parameters_json,parameter_digest,priority,idempotency_key,status,attempt_count,max_attempts,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,?)",
-            (template_id, project_code, requested_by, json.dumps(parameters, ensure_ascii=False, sort_keys=True), parameter_digest, priority, idempotency_key, max_attempts, now, now, now),
+            "INSERT INTO compute_tasks(template_id,project_code,class_code,requested_by,parameters_json,parameter_digest,priority,idempotency_key,status,attempt_count,max_attempts,available_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'queued',0,?,?,?,?)",
+            (template_id, project_code, class_code, requested_by, json.dumps(parameters, ensure_ascii=False, sort_keys=True), parameter_digest, priority, idempotency_key, max_attempts, now, now, now),
         )
         return dict(self.task_by_id(cursor.lastrowid))
 
-    def queued_candidate(self, capabilities: Iterable[str], now: str) -> sqlite3.Row | None:
+    def queued_candidate(self, capabilities: Iterable[str], now: str, blocked_selectors: Iterable[dict[str, Any]] | None = None) -> sqlite3.Row | None:
         capability_list = sorted(set(capabilities))
         params: list[Any] = [now]
         condition = ""
@@ -66,10 +66,39 @@ class ComputeRepository:
             placeholders = ",".join("?" for _ in capability_list)
             condition = f" AND tpl.algorithm IN ({placeholders})"
             params.extend(capability_list)
+        gate = ""
+        selectors = [selector for selector in (blocked_selectors or []) if selector]
+        if selectors:
+            clauses: list[str] = []
+            for selector in selectors:
+                parts: list[str] = []
+                template_codes = selector.get("template_codes") or []
+                project_codes = selector.get("project_codes") or []
+                class_codes = selector.get("class_codes") or []
+                if template_codes:
+                    parts.append(f"tpl.code IN ({','.join('?' for _ in template_codes)})")
+                    params.extend(template_codes)
+                if project_codes:
+                    parts.append(f"t.project_code IN ({','.join('?' for _ in project_codes)})")
+                    params.extend(project_codes)
+                if class_codes:
+                    parts.append(f"t.class_code IN ({','.join('?' for _ in class_codes)})")
+                    params.extend(class_codes)
+                if parts:
+                    clauses.append(" AND ".join(parts))
+            if clauses:
+                gate = " AND NOT (" + " OR ".join(f"({clause})" for clause in clauses) + ")"
         return self.connection.execute(
-            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT 1",
+            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + gate + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT 1",
             params,
         ).fetchone()
+
+    def blocking_window_selectors(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT scope_json FROM compute_maintenance_windows WHERE status IN ('draining','enforced')").fetchall()
+        selectors: list[dict[str, Any]] = []
+        for row in rows:
+            selectors.extend(json.loads(row["scope_json"]).get("selectors", []))
+        return selectors
 
     def result_versions(self, task_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM compute_results WHERE task_id=? ORDER BY version", (task_id,)).fetchall()]

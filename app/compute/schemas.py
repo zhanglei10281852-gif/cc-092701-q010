@@ -26,6 +26,7 @@ class QuotaSet(BaseModel):
 class TaskSubmit(BaseModel):
     template_code: str = Field(min_length=2, max_length=64)
     project_code: str = Field(min_length=1, max_length=80)
+    class_code: str = Field(default="", max_length=80)
     requested_by: str = Field(min_length=1, max_length=80)
     parameters: dict[str, Any]
     priority: int = Field(default=50, ge=0, le=100)

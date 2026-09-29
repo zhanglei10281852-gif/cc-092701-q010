@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     template_id INTEGER NOT NULL REFERENCES compute_templates(id) ON DELETE RESTRICT,
     project_code TEXT NOT NULL,
+    class_code TEXT NOT NULL DEFAULT '',
     requested_by TEXT NOT NULL,
     parameters_json TEXT NOT NULL,
     parameter_digest TEXT NOT NULL,
@@ -293,6 +294,47 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+
+CREATE TABLE IF NOT EXISTS compute_maintenance_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    reason TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    scope_digest TEXT NOT NULL,
+    deadline_policy TEXT NOT NULL CHECK(deadline_policy IN ('cancel','requeue')),
+    status TEXT NOT NULL CHECK(status IN ('announced','draining','enforced','recovered','revoked','merged')),
+    announced_at TEXT NOT NULL,
+    drain_at TEXT NOT NULL,
+    deadline_at TEXT NOT NULL,
+    enforced_at TEXT,
+    recovered_at TEXT,
+    revoked_at TEXT,
+    created_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    merged_into INTEGER REFERENCES compute_maintenance_windows(id),
+    version INTEGER NOT NULL DEFAULT 1,
+    CHECK(drain_at>=announced_at AND deadline_at>drain_at AND (recovered_at IS NULL OR recovered_at>=deadline_at))
+);
+CREATE INDEX IF NOT EXISTS idx_mw_status ON compute_maintenance_windows(status,deadline_at);
+CREATE TABLE IF NOT EXISTS compute_maintenance_task_actions (
+    window_id INTEGER NOT NULL REFERENCES compute_maintenance_windows(id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK(action IN ('cancel','requeue')),
+    actor TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(window_id, task_id, action)
+);
+CREATE INDEX IF NOT EXISTS idx_mwta_task ON compute_maintenance_task_actions(task_id);
+CREATE TABLE IF NOT EXISTS compute_maintenance_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id INTEGER NOT NULL REFERENCES compute_maintenance_windows(id) ON DELETE CASCADE,
+    actor TEXT NOT NULL,
+    event TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mwe_window ON compute_maintenance_events(window_id,id);
 '''
 
 PERMISSIONS = [
@@ -363,6 +405,9 @@ def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(compute_tasks)").fetchall()}
+        if "class_code" not in columns:
+            connection.execute("ALTER TABLE compute_tasks ADD COLUMN class_code TEXT NOT NULL DEFAULT ''")
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",
@@ -389,3 +434,7 @@ def init_db() -> None:
 
 def migrate_db() -> None:
     init_db()
+    with transaction(immediate=True) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(compute_tasks)").fetchall()}
+        if "class_code" not in columns:
+            connection.execute("ALTER TABLE compute_tasks ADD COLUMN class_code TEXT NOT NULL DEFAULT ''")

@@ -12,6 +12,7 @@ from app.routers import affairs, announcements, departments, petitions, resident
 from app.seismic.router import router as seismic_router
 from app.seismic.service import ensure_schema as ensure_seismic_schema
 from app.compute.router import router as compute_router
+from app.compute.maintenance_router import router as maintenance_window_router
 
 
 @asynccontextmanager
@@ -51,6 +52,7 @@ app.include_router(departments.router)
 app.include_router(petitions.router)
 app.include_router(seismic_router)
 app.include_router(compute_router)
+app.include_router(maintenance_window_router)
 
 
 @app.get("/")

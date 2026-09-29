@@ -34,6 +34,21 @@ curl -sS http://127.0.0.1:8432/api/system/health
 
 课程任务运营接口使用 `/api/compute` 前缀，身份、角色、审计和系统接口分别位于 `/api/auth`、`/api/roles`、`/api/audit` 与 `/api/system`。
 
+## 维护窗口（评分组件升级）
+
+升级前可按模板、课程（`project_code`）或班级（`class_code`，任务提交时可选传入）划定维护窗口，接口前缀 `/api/compute/maintenance-windows`：
+
+1. `POST /api/compute/maintenance-windows?actor=...` 创建窗口，指定排空开始 `drain_at`、截止时间 `deadline_at` 与截止策略 `deadline_policy`（`cancel` 或 `requeue`），窗口进入 `announced`（预告）。
+2. `POST /{id}/advance?action=drain` 进入排空；`action=enforce` 在截止时强制处理；`action=recover` 恢复。不带 `action` 时按当前时间自动推进到期阶段。
+3. 排空（`draining`）期间只有命中窗口的新领取被拦截，存量运行任务不受影响；未命中课程/模板/班级的任务正常领取。
+4. 截止（`enforced`）时按策略处置命中存量：`cancel` 取消排队/运行/待响应取消的任务，`requeue` 释放运行任务并保持原优先级重新排队，排队任务原位保留。
+5. `POST /{id}/revoke` 可在预告或排空阶段撤销窗口；强制处理后只能恢复。
+6. 时间重叠的活动窗口自动合并：取最早排空/截止时间、取并集筛选、策略取更严格的 `cancel`，被吸收窗口标记为 `merged`。
+7. `GET /{id}/progress` 返回阶段、命中任务分布（`matched_open_tasks`）、阻塞对象及原因（`blockers`，如占用工作者与租约到期时间）、下一步动作（`next_action`/`next_action_at`）和最近事件。
+
+同一推进动作重复调用是幂等空操作（`noop: true`），每个窗口/任务/动作有唯一处置标记，不会重复取消或重复登记干预。恢复后任务保持原有 `priority`、`created_at` 与可用性时间，回到原排序与配额竞争中。
+
+
 ## 测试与编译检查
 
 ```bash
